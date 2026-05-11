@@ -27,7 +27,7 @@ Kiro 客户端底层依赖 Amazon Q Developer / CodeWhisperer 服务，这些服
 
 ### 2.1 整体拓扑
 
-![Kiro SNI Proxy 架构图](assets/kiro-sni-proxy.png)
+![Kiro SNI Proxy 架构图](https://raw.githubusercontent.com/kasimxiao/kiro-sni-proxy/main/assets/kiro-sni-proxy.png)
 
 ---
 
