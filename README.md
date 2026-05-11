@@ -11,14 +11,15 @@
 
 ### 1.1 背景
 
-Amazon Q Developer / CodeWhisperer（Kiro 客户端的底层服务）默认通过公网访问。企业安全合规场景下，希望数据不走公网，通过 AWS PrivateLink 私有链路访问。
+Kiro 客户端底层依赖 Amazon Q Developer / CodeWhisperer 服务，这些服务的 API 端点部署在海外 AWS Region。企业在中国的团队成员由于网络环境限制，直连海外端点不稳定甚至不可达，需要通过一个固定的海外出口 IP 来稳定访问 Kiro 服务。
 
 ### 1.2 目标
 
+- 为中国团队提供稳定的海外出口 IP，确保 Kiro 正常可用
 - **不使用** Site-to-Site VPN、Client VPN、SD-WAN 等传统方案
 - **不改造** Kiro 客户端本身（不破坏 TLS、不改源码）
 - 支持 40 人团队并发使用
-- 员工在**公司网络**和**个人家庭网络**下都可使用（无需 VPN / 内网维权）
+- 员工在**公司网络**和**个人家庭网络**下都可使用（无需额外 VPN）
 
 ---
 
