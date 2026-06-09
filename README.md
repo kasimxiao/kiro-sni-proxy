@@ -92,6 +92,7 @@ stream {
     map $ssl_preread_server_name $backend {
         codewhisperer.us-east-1.amazonaws.com  $ssl_preread_server_name:443;
         q.us-east-1.amazonaws.com              $ssl_preread_server_name:443;
+        cli.kiro.dev                           $ssl_preread_server_name:443;  # Kiro CLI 新增
         runtime.us-east-1.kiro.dev             $ssl_preread_server_name:443;  # Kiro CLI 新增
         management.us-east-1.kiro.dev          $ssl_preread_server_name:443;  # Kiro CLI 新增
         default                                "";   # 其他域名直接拒绝
@@ -141,6 +142,7 @@ http {
 sudo tee -a /etc/hosts <<EOF
 <EIP>  codewhisperer.us-east-1.amazonaws.com
 <EIP>  q.us-east-1.amazonaws.com
+<EIP>  cli.kiro.dev
 <EIP>  runtime.us-east-1.kiro.dev
 <EIP>  management.us-east-1.kiro.dev
 EOF
@@ -155,6 +157,7 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 ```
 <EIP>  codewhisperer.us-east-1.amazonaws.com
 <EIP>  q.us-east-1.amazonaws.com
+<EIP>  cli.kiro.dev
 <EIP>  runtime.us-east-1.kiro.dev
 <EIP>  management.us-east-1.kiro.dev
 ```
