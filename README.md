@@ -92,10 +92,13 @@ stream {
     map $ssl_preread_server_name $backend {
         codewhisperer.us-east-1.amazonaws.com  $ssl_preread_server_name:443;
         q.us-east-1.amazonaws.com              $ssl_preread_server_name:443;
+        runtime.us-east-1.kiro.dev             $ssl_preread_server_name:443;  # Kiro CLI 新增
+        management.us-east-1.kiro.dev          $ssl_preread_server_name:443;  # Kiro CLI 新增
         default                                "";   # 其他域名直接拒绝
     }
 
     # VPC DNS：解析 Kiro 域名 → VPCE 私网 IP（走 PrivateLink 核心）
+    # 注：*.kiro.dev 无对应 VPCE，169.254.169.253 自动回落到公网 DNS，走公网路径（参见 §8.3 机制）
     resolver 169.254.169.253 valid=30s ipv6=off;
     resolver_timeout 5s;
 
@@ -138,6 +141,8 @@ http {
 sudo tee -a /etc/hosts <<EOF
 <EIP>  codewhisperer.us-east-1.amazonaws.com
 <EIP>  q.us-east-1.amazonaws.com
+<EIP>  runtime.us-east-1.kiro.dev
+<EIP>  management.us-east-1.kiro.dev
 EOF
 
 # macOS 清 DNS 缓存
@@ -150,6 +155,8 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 ```
 <EIP>  codewhisperer.us-east-1.amazonaws.com
 <EIP>  q.us-east-1.amazonaws.com
+<EIP>  runtime.us-east-1.kiro.dev
+<EIP>  management.us-east-1.kiro.dev
 ```
 
 然后 `ipconfig /flushdns`
