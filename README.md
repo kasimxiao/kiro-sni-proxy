@@ -219,17 +219,21 @@ map $ssl_preread_server_name $backend {
 
 #### 5.2.4 客户端 hosts（在 §5.1 基础上追加）
 
+> 🔑 **关键区别：本节 hosts 指向的是 EC2 的私有 IP `<EC2_PRIVATE_IP>`，不是公网 EIP。** 完全隔离环境下客户端通过专线（Direct Connect / VPN）以私网路径到达 EC2 的 ENI，根本够不到公网 EIP。这与 §5.1 常规场景（客户端走公网、指向 EIP）正好相反。请确保：
+> - 客户端所在网络的路由 + 专线能到达 EC2 所在 VPC 网段（如 `10.0.0.0/16`）；
+> - EC2 安全组放行来自客户端网段的 443 入站。
+
 **macOS / Linux**：
 
 ```bash
 sudo tee -a /etc/hosts <<EOF
-<EIP>  app.kiro.dev
-<EIP>  us-east-1.signin.aws
-<EIP>  us-east-1.signin.aws.amazon.com
-<EIP>  <idc-directory-id-or-alias>.awsapps.com
-<EIP>  portal.sso.us-east-1.amazonaws.com
-<EIP>  assets.sso-portal.us-east-1.amazonaws.com
-<EIP>  oidc.us-east-1.amazonaws.com
+<EC2_PRIVATE_IP>  app.kiro.dev
+<EC2_PRIVATE_IP>  us-east-1.signin.aws
+<EC2_PRIVATE_IP>  us-east-1.signin.aws.amazon.com
+<EC2_PRIVATE_IP>  <idc-directory-id-or-alias>.awsapps.com
+<EC2_PRIVATE_IP>  portal.sso.us-east-1.amazonaws.com
+<EC2_PRIVATE_IP>  assets.sso-portal.us-east-1.amazonaws.com
+<EC2_PRIVATE_IP>  oidc.us-east-1.amazonaws.com
 EOF
 
 sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
@@ -238,18 +242,20 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 **Windows**（管理员，编辑 `C:\Windows\System32\drivers\etc\hosts`）：
 
 ```
-<EIP>  app.kiro.dev
-<EIP>  us-east-1.signin.aws
-<EIP>  us-east-1.signin.aws.amazon.com
-<EIP>  <idc-directory-id-or-alias>.awsapps.com
-<EIP>  portal.sso.us-east-1.amazonaws.com
-<EIP>  assets.sso-portal.us-east-1.amazonaws.com
-<EIP>  oidc.us-east-1.amazonaws.com
+<EC2_PRIVATE_IP>  app.kiro.dev
+<EC2_PRIVATE_IP>  us-east-1.signin.aws
+<EC2_PRIVATE_IP>  us-east-1.signin.aws.amazon.com
+<EC2_PRIVATE_IP>  <idc-directory-id-or-alias>.awsapps.com
+<EC2_PRIVATE_IP>  portal.sso.us-east-1.amazonaws.com
+<EC2_PRIVATE_IP>  assets.sso-portal.us-east-1.amazonaws.com
+<EC2_PRIVATE_IP>  oidc.us-east-1.amazonaws.com
 ```
 
 然后 `ipconfig /flushdns`。
 
 > 注意 `<idc-directory-id-or-alias>.awsapps.com` 这行：hosts 不支持通配符，必须写成客户实际的门户域名（如 `d-1234567890.awsapps.com` 或自定义别名 `mycompany.awsapps.com`）。
+>
+> 提示：完全隔离场景下，§5.1 里运行时域名（codewhisperer / q / *.kiro.dev 等）的 hosts 同样应指向 `<EC2_PRIVATE_IP>` 而非 EIP，否则客户端仍然连不上代理。
 
 ### 5.3 验证 hosts 生效
 
