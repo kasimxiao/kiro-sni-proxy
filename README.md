@@ -164,7 +164,94 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 
 然后 `ipconfig /flushdns`
 
-### 5.2 验证 hosts 生效
+### 5.2 完全隔离互联网（仅专线接入 AWS）场景：额外登录/SSO 域名
+
+> ⚠️ **仅适用于「客户端网络完全禁止访问互联网、只通过专线（Direct Connect / VPN）接入 AWS」的客户。** 常规网络环境（客户端能正常出公网）**不需要**本节配置——登录/SSO 认证会走浏览器的公网路径自动完成。
+
+#### 5.2.1 为什么需要
+
+前面 §4.3、§5.1 只覆盖了 Kiro **运行时**（对话推理）流量。但 Kiro 首次**登录**依赖 AWS IAM Identity Center（SSO）+ OIDC 设备授权流程，这套认证会访问一批 `*.aws` / `*.awsapps.com` / `*.sso.amazonaws.com` 域名。
+
+- 常规环境：客户端能出公网，登录页在浏览器里直接打开，认证流量走本地公网，**无需经过代理**。
+- **完全隔离环境**：客户端**任何**出网都被掐断，连登录认证都到不了 AWS，Kiro 会卡在登录环节（拿不到 token）。此时必须把这些**认证域名也纳入 SNI 代理白名单 + 客户端 hosts**，让登录流量同样经代理出口。
+
+> 前提：**代理 EC2 本身能出公网**（本方案 EC2 在 public subnet + IGW + EIP，满足条件）。客户端被隔离、代理不被隔离，正是本方案成立的基础。
+
+#### 5.2.2 需要增加的域名
+
+| 域名 | 用途 |
+|------|------|
+| `app.kiro.dev` | Kiro 登录门户 / 客户端授权入口 |
+| `us-east-1.signin.aws` | AWS 登录端点 |
+| `us-east-1.signin.aws.amazon.com` | AWS 登录端点 |
+| `<idc-directory-id-or-alias>.awsapps.com` | IAM Identity Center 访问门户（**客户专属**，替换为你的 Identity Center 目录 ID 或别名，如 `d-1234567890.awsapps.com`） |
+| `portal.sso.us-east-1.amazonaws.com` | SSO 访问门户 API |
+| `assets.sso-portal.us-east-1.amazonaws.com` | SSO 门户静态资源 |
+| `oidc.us-east-1.amazonaws.com` | SSO OIDC token 端点（设备授权流程发放 token） |
+
+#### 5.2.3 nginx 白名单（在 §4.3 的 `map` 中追加）
+
+```nginx
+map $ssl_preread_server_name $backend {
+    codewhisperer.us-east-1.amazonaws.com     $ssl_preread_server_name:443;
+    q.us-east-1.amazonaws.com                 $ssl_preread_server_name:443;
+    cli.kiro.dev                              $ssl_preread_server_name:443;
+    runtime.us-east-1.kiro.dev                $ssl_preread_server_name:443;
+    management.us-east-1.kiro.dev             $ssl_preread_server_name:443;
+
+    # ↓↓↓ 完全隔离场景：登录 / SSO 认证域名 ↓↓↓
+    app.kiro.dev                              $ssl_preread_server_name:443;
+    us-east-1.signin.aws                      $ssl_preread_server_name:443;
+    us-east-1.signin.aws.amazon.com           $ssl_preread_server_name:443;
+    portal.sso.us-east-1.amazonaws.com        $ssl_preread_server_name:443;
+    assets.sso-portal.us-east-1.amazonaws.com $ssl_preread_server_name:443;
+    oidc.us-east-1.amazonaws.com              $ssl_preread_server_name:443;
+    # IAM Identity Center 门户（客户专属，替换为实际目录 ID/别名）
+    ~^[a-z0-9-]+\.awsapps\.com$               $ssl_preread_server_name:443;
+
+    default                                   "";
+}
+```
+
+> 说明：`*.awsapps.com` 用正则匹配是因为其前缀为客户 Identity Center 目录 ID/别名，因客户而异；若想收紧，可改成精确域名 `d-xxxxxxxxxx.awsapps.com $ssl_preread_server_name:443;`。改完执行 `sudo nginx -t && sudo systemctl reload nginx`。
+
+> DNS 解析：这些认证域名多数**没有对应 VPCE**，按 §8.3 的机制，`resolver 169.254.169.253` 会自动回落到公网 DNS 返回真实公网 IP，代理照常透传，nginx 无需其它改动。
+
+#### 5.2.4 客户端 hosts（在 §5.1 基础上追加）
+
+**macOS / Linux**：
+
+```bash
+sudo tee -a /etc/hosts <<EOF
+<EIP>  app.kiro.dev
+<EIP>  us-east-1.signin.aws
+<EIP>  us-east-1.signin.aws.amazon.com
+<EIP>  <idc-directory-id-or-alias>.awsapps.com
+<EIP>  portal.sso.us-east-1.amazonaws.com
+<EIP>  assets.sso-portal.us-east-1.amazonaws.com
+<EIP>  oidc.us-east-1.amazonaws.com
+EOF
+
+sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
+```
+
+**Windows**（管理员，编辑 `C:\Windows\System32\drivers\etc\hosts`）：
+
+```
+<EIP>  app.kiro.dev
+<EIP>  us-east-1.signin.aws
+<EIP>  us-east-1.signin.aws.amazon.com
+<EIP>  <idc-directory-id-or-alias>.awsapps.com
+<EIP>  portal.sso.us-east-1.amazonaws.com
+<EIP>  assets.sso-portal.us-east-1.amazonaws.com
+<EIP>  oidc.us-east-1.amazonaws.com
+```
+
+然后 `ipconfig /flushdns`。
+
+> 注意 `<idc-directory-id-or-alias>.awsapps.com` 这行：hosts 不支持通配符，必须写成客户实际的门户域名（如 `d-1234567890.awsapps.com` 或自定义别名 `mycompany.awsapps.com`）。
+
+### 5.3 验证 hosts 生效
 
 ```bash
 # ✅ 正确方式（读 hosts）
