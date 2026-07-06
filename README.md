@@ -95,6 +95,10 @@ stream {
         cli.kiro.dev                           $ssl_preread_server_name:443;  # Kiro CLI 新增
         runtime.us-east-1.kiro.dev             $ssl_preread_server_name:443;  # Kiro CLI 新增
         management.us-east-1.kiro.dev          $ssl_preread_server_name:443;  # Kiro CLI 新增
+        open-vsx.org                           $ssl_preread_server_name:443;  # 插件市场
+        openvsx.eclipsecontent.org             $ssl_preread_server_name:443;  # 插件市场 CDN
+        github.com                             $ssl_preread_server_name:443;  # 插件依赖
+        raw.githubusercontent.com              $ssl_preread_server_name:443;  # 插件依赖
         default                                "";   # 其他域名直接拒绝
     }
 
@@ -145,6 +149,10 @@ sudo tee -a /etc/hosts <<EOF
 <EIP>  cli.kiro.dev
 <EIP>  runtime.us-east-1.kiro.dev
 <EIP>  management.us-east-1.kiro.dev
+<EIP>  open-vsx.org
+<EIP>  openvsx.eclipsecontent.org
+<EIP>  github.com
+<EIP>  raw.githubusercontent.com
 EOF
 
 # macOS 清 DNS 缓存
@@ -160,9 +168,15 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 <EIP>  cli.kiro.dev
 <EIP>  runtime.us-east-1.kiro.dev
 <EIP>  management.us-east-1.kiro.dev
+<EIP>  open-vsx.org
+<EIP>  openvsx.eclipsecontent.org
+<EIP>  github.com
+<EIP>  raw.githubusercontent.com
 ```
 
 然后 `ipconfig /flushdns`
+
+> 说明：`open-vsx.org` / `openvsx.eclipsecontent.org` 为 Kiro 插件市场及其 CDN，`github.com` / `raw.githubusercontent.com` 为部分插件安装时拉取的依赖。若不需要在隔离环境内安装/更新插件，可省略这四个域名。完全隔离场景下，这几行 hosts 同样应指向 `<EC2_PRIVATE_IP>` 而非 EIP（参见 §5.2.4）。
 
 ### 5.2 完全隔离互联网（仅专线接入 AWS）场景：额外登录/SSO 域名
 
