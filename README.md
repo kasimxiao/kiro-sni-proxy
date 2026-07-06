@@ -95,10 +95,6 @@ stream {
         cli.kiro.dev                           $ssl_preread_server_name:443;  # Kiro CLI 新增
         runtime.us-east-1.kiro.dev             $ssl_preread_server_name:443;  # Kiro CLI 新增
         management.us-east-1.kiro.dev          $ssl_preread_server_name:443;  # Kiro CLI 新增
-        open-vsx.org                           $ssl_preread_server_name:443;  # 插件市场
-        openvsx.eclipsecontent.org             $ssl_preread_server_name:443;  # 插件市场 CDN
-        github.com                             $ssl_preread_server_name:443;  # 插件依赖
-        raw.githubusercontent.com              $ssl_preread_server_name:443;  # 插件依赖
         default                                "";   # 其他域名直接拒绝
     }
 
@@ -149,10 +145,6 @@ sudo tee -a /etc/hosts <<EOF
 <EIP>  cli.kiro.dev
 <EIP>  runtime.us-east-1.kiro.dev
 <EIP>  management.us-east-1.kiro.dev
-<EIP>  open-vsx.org
-<EIP>  openvsx.eclipsecontent.org
-<EIP>  github.com
-<EIP>  raw.githubusercontent.com
 EOF
 
 # macOS 清 DNS 缓存
@@ -168,15 +160,9 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 <EIP>  cli.kiro.dev
 <EIP>  runtime.us-east-1.kiro.dev
 <EIP>  management.us-east-1.kiro.dev
-<EIP>  open-vsx.org
-<EIP>  openvsx.eclipsecontent.org
-<EIP>  github.com
-<EIP>  raw.githubusercontent.com
 ```
 
 然后 `ipconfig /flushdns`
-
-> 说明：`open-vsx.org` / `openvsx.eclipsecontent.org` 为 Kiro 插件市场及其 CDN，`github.com` / `raw.githubusercontent.com` 为部分插件安装时拉取的依赖。若不需要在隔离环境内安装/更新插件，可省略这四个域名。完全隔离场景下，这几行 hosts 同样应指向 `<EC2_PRIVATE_IP>` 而非 EIP（参见 §5.2.4）。
 
 ### 5.2 完全隔离互联网（仅专线接入 AWS）场景：额外登录/SSO 域名
 
@@ -203,6 +189,15 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 | `assets.sso-portal.us-east-1.amazonaws.com` | SSO 门户静态资源 |
 | `oidc.us-east-1.amazonaws.com` | SSO OIDC token 端点（设备授权流程发放 token） |
 
+此外，若需在隔离环境内**安装 / 更新 Kiro 插件**，还需放行插件市场及其依赖域名（不装插件可省略）：
+
+| 域名 | 用途 |
+|------|------|
+| `open-vsx.org` | 插件市场（Open VSX Registry） |
+| `openvsx.eclipsecontent.org` | 插件市场 CDN（插件包下载） |
+| `github.com` | 部分插件安装时拉取的依赖 |
+| `raw.githubusercontent.com` | 部分插件安装时拉取的依赖 |
+
 #### 5.2.3 nginx 白名单（在 §4.3 的 `map` 中追加）
 
 ```nginx
@@ -222,6 +217,12 @@ map $ssl_preread_server_name $backend {
     oidc.us-east-1.amazonaws.com              $ssl_preread_server_name:443;
     # IAM Identity Center 门户（客户专属，替换为实际目录 ID/别名）
     ~^[a-z0-9-]+\.awsapps\.com$               $ssl_preread_server_name:443;
+
+    # ↓↓↓ 插件市场及依赖（隔离环境内需安装/更新插件时才需要）↓↓↓
+    open-vsx.org                              $ssl_preread_server_name:443;
+    openvsx.eclipsecontent.org                $ssl_preread_server_name:443;
+    github.com                                $ssl_preread_server_name:443;
+    raw.githubusercontent.com                 $ssl_preread_server_name:443;
 
     default                                   "";
 }
@@ -248,6 +249,11 @@ sudo tee -a /etc/hosts <<EOF
 <EC2_PRIVATE_IP>  portal.sso.us-east-1.amazonaws.com
 <EC2_PRIVATE_IP>  assets.sso-portal.us-east-1.amazonaws.com
 <EC2_PRIVATE_IP>  oidc.us-east-1.amazonaws.com
+# 插件市场及依赖（需在隔离环境内安装/更新插件时才需要）
+<EC2_PRIVATE_IP>  open-vsx.org
+<EC2_PRIVATE_IP>  openvsx.eclipsecontent.org
+<EC2_PRIVATE_IP>  github.com
+<EC2_PRIVATE_IP>  raw.githubusercontent.com
 EOF
 
 sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
@@ -263,6 +269,11 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 <EC2_PRIVATE_IP>  portal.sso.us-east-1.amazonaws.com
 <EC2_PRIVATE_IP>  assets.sso-portal.us-east-1.amazonaws.com
 <EC2_PRIVATE_IP>  oidc.us-east-1.amazonaws.com
+# 插件市场及依赖（需在隔离环境内安装/更新插件时才需要）
+<EC2_PRIVATE_IP>  open-vsx.org
+<EC2_PRIVATE_IP>  openvsx.eclipsecontent.org
+<EC2_PRIVATE_IP>  github.com
+<EC2_PRIVATE_IP>  raw.githubusercontent.com
 ```
 
 然后 `ipconfig /flushdns`。
