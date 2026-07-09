@@ -59,6 +59,8 @@ Kiro 客户端底层依赖 Amazon Q Developer / CodeWhisperer 服务，这些服
 
 ## 4. EC2 配置详解
 
+> 💡 **自动化部署**：本节的全部配置（网络、安全组、VPCE、EC2 + nginx SNI 透传、EIP）已封装为一键脚本，见 [`deploy/`](./deploy/) 目录。支持复用已有 VPC/子网或自动新建，`config.env` 一处配置后执行 `./deploy.sh` 即可，`./cleanup.sh` 精确回收。下文为手工配置详解与原理说明。
+
 ### 4.1 操作系统
 
 - **OS**：Ubuntu 24.04 LTS (Noble Numbat)

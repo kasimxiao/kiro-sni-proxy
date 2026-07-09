@@ -1,0 +1,12 @@
+# 部署运行时产物（含真实资源ID/EIP，勿提交）
+.deploy-state.env
+client-hosts.txt
+
+# 本地实际配置（从 config.env.example 复制后填写；勿提交真实 VPC/子网/IP）
+# 如需保护 config.env 本身，取消下一行注释：
+# config.env
+
+# 临时文件
+*.tmp
+*.bak
+*.bak.*
