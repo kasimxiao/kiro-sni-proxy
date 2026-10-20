@@ -23,13 +23,14 @@ read -r -p "确认删除？输入 yes 继续: " ans
 [[ "${ans}" == "yes" ]] || { echo "已取消"; exit 0; }
 
 # 1. EIP（先解绑再释放）
-if [[ -n "${EIP_ALLOC_ID:-}" ]]; then
-  log "释放 EIP ${EIP_ALLOC_ID}"
-  ASSOC="$("${AWSCLI[@]}" ec2 describe-addresses --allocation-ids "${EIP_ALLOC_ID}" \
+# 多网卡部署记录在 EIP_ALLOC_IDS（空格分隔）；旧状态文件只有单值 EIP_ALLOC_ID
+for alloc in ${EIP_ALLOC_IDS:-${EIP_ALLOC_ID:-}}; do
+  log "释放 EIP ${alloc}"
+  ASSOC="$("${AWSCLI[@]}" ec2 describe-addresses --allocation-ids "${alloc}" \
       --query 'Addresses[0].AssociationId' --output text 2>/dev/null || echo None)"
   [[ "${ASSOC}" != "None" && -n "${ASSOC}" ]] && "${AWSCLI[@]}" ec2 disassociate-address --association-id "${ASSOC}" || true
-  "${AWSCLI[@]}" ec2 release-address --allocation-id "${EIP_ALLOC_ID}" || warn "释放 EIP 失败"
-fi
+  "${AWSCLI[@]}" ec2 release-address --allocation-id "${alloc}" || warn "释放 EIP ${alloc} 失败"
+done
 
 # 2. EC2 实例
 if [[ -n "${INSTANCE_ID:-}" ]]; then

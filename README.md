@@ -441,6 +441,26 @@ aws ec2 delete-vpc-endpoints --region us-east-1 \
 
 ---
 
+### 8.4 多网卡（多入口）
+
+单台代理可以挂多块 ENI，同时从多个入口接收转发流量。
+
+- **入站**：nginx 配置 `listen 443 reuseport;` 未指定 IP，等价于监听 `0.0.0.0:443`，所有网卡上的所有 IP 同时生效。客户端 hosts 指向哪个 EIP / 私有 IP，流量就从对应网卡进入。
+- **自动化**：`deploy/config.env` 设置 `ENI_COUNT=2`（或更大）即可，脚本会在 `run-instances` 时内联声明多块 ENI，并为每块 ENI 各绑一个 EIP，`client-hosts.txt` 按网卡分组输出。
+- **日志**：`log_format` 增加了 `to=$server_addr`，可以直接看出每条连接从哪块网卡进入。
+- **路由**：Ubuntu 24.04 + cloud-init 会自动为第二块网卡生成策略路由（`from <eth1 IP> lookup 101`），同子网多网卡不需要手工配 `ip rule`。
+- **限制**：多网卡不增加带宽（带宽取决于实例规格，不是 ENI 数量）；实例类型有 ENI 数量上限（c6g.large 为 3）；需要吞吐或高可用请用 §8.2 的 ASG + NLB。
+
+实测（us-east-1，t4g.small，Ubuntu 24.04，2 块 ENI 各绑 1 个 EIP）：
+
+| 测试 | 结果 |
+|---|---|
+| 访问 EIP-A:443，SNI = `q.us-east-1.amazonaws.com` | 透传成功，返回后端 HTTP 404 |
+| 访问 EIP-B:443，SNI = `q.us-east-1.amazonaws.com` | 透传成功，返回后端 HTTP 404 |
+| 访问 EIP-A:443，SNI = `example.com` | 白名单拒绝（backend 为空，status=500） |
+
+服务端日志可见两个 `to=` 地址（两块网卡的私有 IP）各自出现 `status=200` 的转发记录。
+
 ## 9. 方案局限
 
 | 局限 | 影响 | 缓解建议 |

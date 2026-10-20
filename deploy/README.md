@@ -40,6 +40,7 @@ vi config.env
 - `ADMIN_SSH_CIDR`：留空则不开 22（推荐用 SSM 登录）。
 - `SNI_DOMAINS`：nginx 白名单域名。默认 Kiro 运行时 5 域名；完全隔离场景追加认证域名。
 - `INSTANCE_TYPE` / `INSTANCE_ARCH`：默认 `c6g.large` / `arm64`。
+- `ENI_COUNT`：实例网卡数量（含主网卡），默认 `1`，行为与原版一致。`>1` 时在同一子网挂多块 ENI，**每块各绑一个 EIP**；脚本会按实例类型的 ENI 上限做校验。`client-hosts.txt` 会为每块网卡生成一组 hosts，**每个客户端只选其中一组**。多网卡不增加带宽，用途是按入口区分客户端（如公网 / 专线分流、多出口 IP）；nginx 日志中的 `to=` 字段标明流量从哪块网卡进入。
 
 ## 部署产物
 - `client-hosts.txt`：客户端 hosts 片段（域名 → EIP），直接追加到本地 hosts。

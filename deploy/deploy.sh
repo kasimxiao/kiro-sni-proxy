@@ -40,6 +40,16 @@ ACCOUNT_ID="$("${AWSCLI[@]}" sts get-caller-identity --query Account --output te
 log "AWS 账号: ${ACCOUNT_ID}  Region: ${AWS_REGION}"
 
 TAG_SPEC_BASE="Key=Project,Value=${PROJECT_NAME}"
+# 多网卡数量（旧版 config.env 未定义时默认 1）
+ENI_COUNT="${ENI_COUNT:-1}"
+[[ "${ENI_COUNT}" =~ ^[1-9][0-9]*$ ]] || die "ENI_COUNT 必须为正整数（当前: ${ENI_COUNT}）"
+if [[ "${ENI_COUNT}" -gt 1 ]]; then
+  MAX_ENI="$("${AWSCLI[@]}" ec2 describe-instance-types --instance-types "${INSTANCE_TYPE}" \
+      --query 'InstanceTypes[0].NetworkInfo.MaximumNetworkInterfaces' --output text 2>/dev/null || echo 0)"
+  [[ "${MAX_ENI}" =~ ^[0-9]+$ && "${ENI_COUNT}" -le "${MAX_ENI}" ]] \
+    || die "实例类型 ${INSTANCE_TYPE} 最多支持 ${MAX_ENI} 块 ENI，ENI_COUNT=${ENI_COUNT} 超限"
+  log "多网卡模式: ENI_COUNT=${ENI_COUNT}（实例类型最多 ${MAX_ENI}）"
+fi
 
 #############################################
 # 1. 网络：复用或新建 VPC / 子网
@@ -243,7 +253,7 @@ ${MAP_LINES}        default                                "";
     resolver 169.254.169.253 valid=30s ipv6=off;
     resolver_timeout 5s;
 
-    log_format sni '\$remote_addr [\$time_local] sni="\$ssl_preread_server_name" '
+    log_format sni '\$remote_addr to=\$server_addr [\$time_local] sni="\$ssl_preread_server_name" '
                    'backend="\$backend" status=\$status sent=\$bytes_sent recv=\$bytes_received '
                    'duration=\$session_time';
     access_log /var/log/nginx/sni.log sni buffer=64k flush=5s;
@@ -296,15 +306,25 @@ RUN_ARGS=(
   ec2 run-instances
   --image-id "${AMI_ID}"
   --instance-type "${INSTANCE_TYPE}"
-  --subnet-id "${SUBNET_ID}"
-  --security-group-ids "${PROXY_SG_ID}"
   --iam-instance-profile "Name=${INSTANCE_PROFILE}"
-  --associate-public-ip-address
   --metadata-options "HttpTokens=required,HttpEndpoint=enabled"
   --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${EBS_SIZE_GB},VolumeType=gp3,DeleteOnTermination=true}"
   --user-data "file://${USERDATA_FILE}"
   --tag-specifications "ResourceType=instance,Tags=[{${TAG_SPEC_BASE}},{Key=Name,Value=${PROJECT_NAME}-ec2}]"
 )
+if [[ "${ENI_COUNT}" -eq 1 ]]; then
+  # 单网卡：与原版一致
+  RUN_ARGS+=(--subnet-id "${SUBNET_ID}" --security-group-ids "${PROXY_SG_ID}" --associate-public-ip-address)
+else
+  # 多网卡：run-instances 内联声明全部 ENI（此时不能再传 --subnet-id/--security-group-ids）
+  # 多 ENI 无法自动分配公网 IP，统一在后面为每块 ENI 绑定 EIP；DeleteOnTermination 保证终止时 ENI 自动回收
+  # 注意：AWS CLI 的 --network-interfaces 只能出现一次，多个 ENI 作为多个值跟在同一个参数后面
+  ENI_SPECS=()
+  for ((i=0; i<ENI_COUNT; i++)); do
+    ENI_SPECS+=("DeviceIndex=${i},SubnetId=${SUBNET_ID},Groups=${PROXY_SG_ID},DeleteOnTermination=true")
+  done
+  RUN_ARGS+=(--network-interfaces "${ENI_SPECS[@]}")
+fi
 [[ -n "${KEY_NAME}" ]] && RUN_ARGS+=(--key-name "${KEY_NAME}")
 
 log "启动 EC2 实例..."
@@ -315,33 +335,62 @@ log "实例已创建: ${INSTANCE_ID}，等待 running..."
 "${AWSCLI[@]}" ec2 wait instance-running --instance-ids "${INSTANCE_ID}"
 
 #############################################
-# 7. 分配并绑定 EIP
+# 7. 为每块 ENI 分配并绑定 EIP
 #############################################
-log "分配 EIP 并绑定"
-EIP_ALLOC_ID="$("${AWSCLI[@]}" ec2 allocate-address --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=[{${TAG_SPEC_BASE}},{Key=Name,Value=${PROJECT_NAME}-eip}]" \
-    --query 'AllocationId' --output text)"
-save_state EIP_ALLOC_ID "${EIP_ALLOC_ID}"
-"${AWSCLI[@]}" ec2 associate-address --instance-id "${INSTANCE_ID}" \
-    --allocation-id "${EIP_ALLOC_ID}" >/dev/null
-EIP="$("${AWSCLI[@]}" ec2 describe-addresses --allocation-ids "${EIP_ALLOC_ID}" \
-    --query 'Addresses[0].PublicIp' --output text)"
-save_state EIP "${EIP}"
-
-PRIVATE_IP="$("${AWSCLI[@]}" ec2 describe-instances --instance-ids "${INSTANCE_ID}" \
-    --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
-
+log "查询实例网卡（共 ${ENI_COUNT} 块）"
+# 按 DeviceIndex 排序，得到 "eni-id private-ip" 列表（主网卡在前）
+mapfile -t ENI_ROWS < <("${AWSCLI[@]}" ec2 describe-instances --instance-ids "${INSTANCE_ID}" \
+    --query 'sort_by(Reservations[0].Instances[0].NetworkInterfaces,&Attachment.DeviceIndex)[].[NetworkInterfaceId,PrivateIpAddress]' \
+    --output text | tr '\t' ' ')
+[[ "${#ENI_ROWS[@]}" -eq "${ENI_COUNT}" ]] \
+  || die "期望 ${ENI_COUNT} 块 ENI，实际 ${#ENI_ROWS[@]} 块"
+EIP_ALLOC_IDS=()
+EIPS=()
+PRIVATE_IPS=()
+idx=0
+for row in "${ENI_ROWS[@]}"; do
+  ENI_ID="${row%% *}"
+  ENI_PRIV="${row##* }"
+  log "网卡 eth${idx}: ${ENI_ID} (${ENI_PRIV}) 分配并绑定 EIP"
+  ALLOC="$("${AWSCLI[@]}" ec2 allocate-address --domain vpc \
+      --tag-specifications "ResourceType=elastic-ip,Tags=[{${TAG_SPEC_BASE}},{Key=Name,Value=${PROJECT_NAME}-eip-${idx}}]" \
+      --query 'AllocationId' --output text)"
+  # 先落盘再绑定，保证中途失败时 cleanup.sh 也能回收
+  EIP_ALLOC_IDS+=("${ALLOC}")
+  save_state EIP_ALLOC_IDS "${EIP_ALLOC_IDS[*]}"
+  "${AWSCLI[@]}" ec2 associate-address --network-interface-id "${ENI_ID}" \
+      --allocation-id "${ALLOC}" >/dev/null
+  EIP_ADDR="$("${AWSCLI[@]}" ec2 describe-addresses --allocation-ids "${ALLOC}" \
+      --query 'Addresses[0].PublicIp' --output text)"
+  EIPS+=("${EIP_ADDR}")
+  PRIVATE_IPS+=("${ENI_PRIV}")
+  idx=$((idx+1))
+done
+# 兼容旧 cleanup.sh / 旧状态文件：保留第一块网卡的单值变量
+save_state EIP_ALLOC_ID "${EIP_ALLOC_IDS[0]}"
+save_state EIP "${EIPS[0]}"
+save_state EIPS "${EIPS[*]}"
+PRIVATE_IP="${PRIVATE_IPS[0]}"
 #############################################
 # 8. 输出结果 + 生成客户端 hosts 片段
 #############################################
 HOSTS_FILE="${SCRIPT_DIR}/client-hosts.txt"
 {
-  echo "# === Kiro SNI Proxy 客户端 hosts（常规场景：指向 EIP）==="
-  for d in "${SNI_DOMAINS[@]}"; do
-    printf '%-15s %s\n' "${EIP}" "${d}"
+  for ((i=0; i<ENI_COUNT; i++)); do
+    echo "# === Kiro SNI Proxy 客户端 hosts：入口 eth${i}（常规场景指向 EIP ${EIPS[$i]}；隔离场景改用私有 IP ${PRIVATE_IPS[$i]}）==="
+    for d in "${SNI_DOMAINS[@]}"; do
+      printf '%-15s %s\n' "${EIPS[$i]}" "${d}"
+    done
+    echo
   done
 } > "${HOSTS_FILE}"
-
+if [[ "${ENI_COUNT}" -gt 1 ]]; then
+  warn "多网卡模式：${HOSTS_FILE} 含 ${ENI_COUNT} 组 hosts，每个客户端只应选用【其中一组】，不要全部追加"
+fi
+NIC_LINES=""
+for ((i=0; i<ENI_COUNT; i++)); do
+  NIC_LINES+="  网卡 eth${i}      : EIP ${EIPS[$i]}  /  私有 IP ${PRIVATE_IPS[$i]}"$'\n'
+done
 echo
 c_green "=================================================="
 c_green "         部署完成 ✅"
@@ -350,23 +399,19 @@ cat <<SUMMARY
   Region        : ${AWS_REGION}
   VPC           : ${VPC_ID} (${VPC_CIDR}) $( [[ ${CREATED_NETWORK} == true ]] && echo '[新建]' || echo '[复用]' )
   Subnet        : ${SUBNET_ID}
-  实例 ID       : ${INSTANCE_ID} (${INSTANCE_TYPE}, ${INSTANCE_ARCH})
-  公网 EIP      : ${EIP}
-  私有 IP       : ${PRIVATE_IP}   （完全隔离场景 hosts 指向此 IP）
-  PrivateLink   : ${ENABLE_PRIVATELINK}
+  实例 ID       : ${INSTANCE_ID} (${INSTANCE_TYPE}, ${INSTANCE_ARCH}, ENI x${ENI_COUNT})
+${NIC_LINES}  PrivateLink   : ${ENABLE_PRIVATELINK}
   客户端 hosts  : ${HOSTS_FILE}
-
   下一步：
    1) nginx 由 user-data 自动安装，约 1-2 分钟就绪。
-   2) 客户端追加 ${HOSTS_FILE} 内容到 hosts 后刷新 DNS 缓存：
+   2) 客户端追加 ${HOSTS_FILE} 内容（多网卡时只选一组）到 hosts 后刷新 DNS 缓存：
         macOS : sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
         Windows: ipconfig /flushdns
-   3) 验证：
-        getent hosts codewhisperer.${AWS_REGION}.amazonaws.com
-        curl -v https://codewhisperer.${AWS_REGION}.amazonaws.com/ 2>&1 | grep Connected
+   3) 验证（多网卡时对每个 EIP 各测一次）：
+        curl -sk -o /dev/null -w '%{http_code} %{remote_ip}\n' \\
+          --resolve q.${AWS_REGION}.amazonaws.com:443:<EIP> https://q.${AWS_REGION}.amazonaws.com/
    4) 登录 EC2 看日志（无需 22）：
         aws ssm start-session --target ${INSTANCE_ID} --region ${AWS_REGION}
-        sudo tail -f /var/log/nginx/sni.log
-
+        sudo tail -f /var/log/nginx/sni.log      # to=<网卡私有IP> 标明流量从哪块网卡进入
   资源清理： ./cleanup.sh
 SUMMARY
