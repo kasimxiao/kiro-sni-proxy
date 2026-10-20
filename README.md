@@ -451,6 +451,167 @@ aws ec2 delete-vpc-endpoints --region us-east-1 \
 - **路由**：Ubuntu 24.04 + cloud-init 会自动为第二块网卡生成策略路由（`from <eth1 IP> lookup 101`），同子网多网卡不需要手工配 `ip rule`。
 - **限制**：多网卡不增加带宽（带宽取决于实例规格，不是 ENI 数量）；实例类型有 ENI 数量上限（c6g.large 为 3）；需要吞吐或高可用请用 §8.2 的 ASG + NLB。
 
+#### 手动操作流程（给已有代理实例加网卡）
+
+不使用 `deploy.sh`、或要给已部署的实例追加网卡时，按下面步骤操作。以下命令中的 `<...>` 需替换为实际值。
+
+**Step 1：确认实例支持更多 ENI**
+
+```bash
+aws ec2 describe-instance-types --region us-east-1 --instance-types <INSTANCE_TYPE> \
+  --query 'InstanceTypes[0].NetworkInfo.[MaximumNetworkInterfaces,Ipv4AddressesPerInterface]'
+```
+
+**Step 2：创建新 ENI**（子网必须与实例在同一可用区，安全组需放行客户端来源的 443）
+
+```bash
+aws ec2 create-network-interface --region us-east-1 \
+  --subnet-id <SUBNET_ID> --groups <PROXY_SG_ID> \
+  --description "kiro-sni-proxy eth1" \
+  --query 'NetworkInterface.[NetworkInterfaceId,PrivateIpAddress]' --output text
+```
+
+**Step 3：挂载到实例**（`device-index` 主网卡为 0，新网卡从 1 开始）
+
+```bash
+aws ec2 attach-network-interface --region us-east-1 \
+  --network-interface-id <ENI_ID> --instance-id <INSTANCE_ID> --device-index 1
+```
+
+如需实例终止时自动删除该 ENI：
+
+```bash
+aws ec2 modify-network-interface-attribute --region us-east-1 \
+  --network-interface-id <ENI_ID> \
+  --attachment AttachmentId=<ATTACHMENT_ID>,DeleteOnTermination=true
+```
+
+**Step 4：为新 ENI 绑定 EIP**（常规公网场景；专线 / 隔离场景可跳过，客户端直接用 ENI 私有 IP）
+
+```bash
+aws ec2 allocate-address --region us-east-1 --domain vpc --query AllocationId --output text
+aws ec2 associate-address --region us-east-1 \
+  --allocation-id <EIP_ALLOC_ID> --network-interface-id <ENI_ID>
+```
+
+**Step 5：确认系统已识别新网卡并配好策略路由**（通过 SSM 登录实例）
+
+```bash
+aws ssm start-session --target <INSTANCE_ID> --region us-east-1
+
+ip -br addr          # 应看到 ens5、ens6 都有私有 IP
+ip rule              # 应看到 from <eth1 私有IP> lookup 101
+ip route show table 101
+```
+
+- 实例**启动时**就带多块 ENI（`deploy.sh` 的 `ENI_COUNT>1` 方式），Ubuntu 24.04 的 cloud-init 会自动生成这些配置，无需手工处理。
+- 对**运行中热挂载**的 ENI，系统可能没有自动配置。此时最简单的办法是重启实例（`sudo reboot`）让 cloud-init 重新生成；不想重启则手工补策略路由（下面的 Step 6）。这一步我只验证了启动时带多块 ENI 的情况，热挂载场景未实测。
+
+**Step 6（仅在 Step 5 缺少配置时）：手工配置策略路由**
+
+原因：两块网卡在同一子网时，默认路由只经 eth0。发往 eth1 私有 IP 的请求，回包若仍走 eth0，源地址不匹配会被丢弃，所以需要让"源地址为 eth1 IP 的包"走 eth1 出去。
+
+```bash
+# 变量：按实际值替换
+IF=ens6                     # 新网卡名（ip -br addr 查看）
+IP=<ENI 私有 IP>            # 例：172.31.37.93
+GW=<子网网关>               # 子网 CIDR 的第 1 个地址，例：172.31.32.1
+CIDR=<子网 CIDR>            # 例：172.31.32.0/20
+
+sudo ip route add default via $GW dev $IF table 101
+sudo ip route add $CIDR dev $IF src $IP table 101
+sudo ip rule add from $IP lookup 101
+```
+
+以上是临时生效（重启丢失）。持久化可写入 netplan，例如 `/etc/netplan/60-eth1.yaml`：
+
+```yaml
+network:
+  version: 2
+  ethernets:
+    ens6:
+      dhcp4: true
+      dhcp4-overrides:
+        use-routes: false
+      routes:
+        - to: 0.0.0.0/0
+          via: <子网网关>
+          table: 101
+        - to: <子网 CIDR>
+          scope: link
+          table: 101
+      routing-policy:
+        - from: <ENI 私有 IP>
+          table: 101
+```
+
+```bash
+sudo netplan try      # 确认网络未中断后回车确认
+```
+
+**Step 7：nginx 无需任何改动**
+
+`listen 443` 已监听所有网卡。如需在日志中区分入口，把 `/etc/nginx/nginx.conf` 的 `log_format` 加上 `to=$server_addr`：
+
+```nginx
+log_format sni '$remote_addr to=$server_addr [$time_local] sni="$ssl_preread_server_name" '
+               'backend="$backend" status=$status sent=$bytes_sent recv=$bytes_received '
+               'duration=$session_time';
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+如果需要**只在指定网卡上监听**，把 `listen 443 reuseport;` 改成按 IP 监听（每个 IP:端口组合各写一条 `listen`；`reuseport` 对同一个 IP:端口只需写一次）：
+
+```nginx
+server {
+    listen 172.31.37.123:443 reuseport;
+    listen 172.31.37.93:443 reuseport;
+    ...
+}
+```
+
+**Step 8：客户端 hosts**
+
+每个客户端只选一个入口，按场景指向对应 IP：
+
+- 公网用户 → 该网卡的 EIP
+- 专线 / 隔离网络用户 → 该网卡的私有 IP（参见 §5.2.4）
+
+**Step 9：验证**
+
+对每个入口 IP 分别测试（`--resolve` 不依赖 hosts，可以在配置 hosts 之前直接测）：
+
+```bash
+curl -sk -m 15 -o /dev/null -w '%{http_code} %{remote_ip}\n' \
+  --resolve q.us-east-1.amazonaws.com:443:<入口IP> https://q.us-east-1.amazonaws.com/
+# 期望返回 404（q 服务对根路径的正常响应，说明已透传到真实后端）
+
+# 白名单反证：非白名单域名应被拒绝（连接被关闭，curl 返回 000）
+curl -sk -m 10 -o /dev/null -w '%{http_code}\n' \
+  --resolve example.com:443:<入口IP> https://example.com/
+```
+
+在实例上确认两块网卡都有流量：
+
+```bash
+sudo tail -n 20 /var/log/nginx/sni.log
+# 应能看到不同的 to=<私有IP>，且 status=200
+```
+
+**Step 10：回收（不再需要时）**
+
+```bash
+aws ec2 disassociate-address --region us-east-1 --association-id <EIP_ASSOC_ID>
+aws ec2 release-address --region us-east-1 --allocation-id <EIP_ALLOC_ID>
+aws ec2 detach-network-interface --region us-east-1 --attachment-id <ATTACHMENT_ID>
+aws ec2 delete-network-interface --region us-east-1 --network-interface-id <ENI_ID>
+```
+
+> 排错提示：如果从公网访问某个 EIP 超时，先检查（1）安全组是否放行了你的**实际出口 IP**（公司网络出口 IP 可能轮换，且 curl 与浏览器的出口可能不同）；（2）Step 5 的策略路由是否存在；（3）`sudo ss -ltnp | grep 443` 确认 nginx 在监听。
+
 实测（us-east-1，t4g.small，Ubuntu 24.04，2 块 ENI 各绑 1 个 EIP）：
 
 | 测试 | 结果 |
